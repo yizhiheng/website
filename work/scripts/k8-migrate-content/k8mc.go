@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io/ioutil"
 	"log"
 	"regexp"
 
@@ -14,6 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/spf13/cast"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/hacdias/fileutils"
 
@@ -40,18 +45,24 @@ func main() {
 		log.Println("trial mode on")
 	}
 
-	// Copies the content files into the new Hugo content roots and do basic
-	// renaming of some files to match Hugo's standard.
-	must(m.contentMigrate_Step1_Basic_Copy_And_Rename())
+	if false {
 
-	// Do all replacements needed in the content files:
-	// * Add menu config
-	// * Replace inline Liquid with shortcodes
-	// * Etc.
-	must(m.contentMigrate_Step2_Replacements())
+		// Copies the content files into the new Hugo content roots and do basic
+		// renaming of some files to match Hugo's standard.
+		must(m.contentMigrate_Step1_Basic_Copy_And_Rename())
+
+		// Do all replacements needed in the content files:
+		// * Add menu config
+		// * Replace inline Liquid with shortcodes
+		// * Etc.
+		must(m.contentMigrate_Replacements())
+
+	}
+
+	must(m.contentMigrate_CreateSections())
 
 	// Copy in some content that failed in the steps above etc.
-	must(m.contentMigrate_Step3_Final())
+	//must(m.contentMigrate_Final_Step())
 
 	if m.try {
 		m.printStats(os.Stdout)
@@ -136,8 +147,135 @@ func (m *mover) contentMigrate_Step1_Basic_Copy_And_Rename() error {
 	return nil
 }
 
-func (m *mover) contentMigrate_Step2_Replacements() error {
-	log.Println("Start Step 2 …")
+func (m *mover) contentMigrate_CreateSections() error {
+	log.Println("Start Create Sections Step …")
+
+	// Make every node in the content tree a section.
+	// Start with "Contepts" to test out the concept.
+	// TODO(bep)
+
+	// Read "toc" from the root of /data
+	dataDir := m.absFilename("data")
+
+	fd, err := os.Open(dataDir)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	fis, err := fd.Readdir(-1)
+	if err != nil {
+		return err
+	}
+
+	sectionsData := make(map[string]SectionFromData)
+
+	for _, fi := range fis {
+		if fi.IsDir() {
+			continue
+		}
+		name := fi.Name()
+		baseName := strings.TrimSuffix(name, filepath.Ext(name))
+		b, err := ioutil.ReadFile(filepath.Join(dataDir, name))
+		if err != nil {
+			return err
+		}
+		var section SectionFromData
+
+		if err := yaml.Unmarshal(b, &section); err != nil {
+			return err
+		}
+		sectionsData[baseName] = section
+
+	}
+
+	for k, v := range sectionsData {
+		if k != "concepts" {
+			continue
+		}
+		fmt.Println(">>>", k, "::")
+
+		for _, tocEntry := range v.Toc {
+			switch v := tocEntry.(type) {
+			case string:
+				fmt.Println("String:", v)
+			case map[interface{}]interface{}:
+				if err := m.handleTocEntryRecursive(cast.ToStringMap(v)); err != nil {
+					return err
+				}
+			default:
+				fmt.Printf("TYPE: %T\n", tocEntry)
+			}
+
+		}
+
+	}
+
+	return nil
+}
+
+type SectionFromData struct {
+	Bigheader   string        `yaml:"bigheader"`
+	Abstract    string        `yaml:"abstract"`
+	LandingPage string        `yaml:"landing_page"`
+	Toc         []interface{} `yaml:"toc"`
+}
+
+func (m *mover) handleTocEntryRecursive(entry map[string]interface{}) error {
+	title := cast.ToString(entry["title"])
+	//landingPage := cast.ToString(entry["landing_page"])
+
+	var sectionContentPageWritten bool
+
+	if sect, found := entry["section"]; found {
+		for i, e := range sect.([]interface{}) {
+			switch v := e.(type) {
+			case string:
+				if strings.HasSuffix(v, "index.md") {
+					continue
+				}
+				// 1. Create a section content file if not already written
+				if !sectionContentPageWritten {
+					sectionContentPageWritten = true
+					// TODO(bep) cn?
+					relFilename := filepath.Join("content", "en", filepath.Dir(v), "_index.md")
+					if !m.checkRelFileExists(relFilename) {
+						filename := filepath.Join(m.absFilename(relFilename))
+						content := fmt.Sprintf(`---
+title: %q
+---
+
+`, title)
+						if err := ioutil.WriteFile(filename, []byte(content), os.FileMode(0755)); err != nil {
+							return err
+						}
+					}
+				}
+
+				relFilename := filepath.Join("content", "en", v)
+				if !m.checkRelFileExists(relFilename) {
+					log.Println("content file in toc does not exist:", relFilename)
+					continue
+				}
+				// 2. Set a weight in the relevant content file to get proper ordering.
+				if err := m.replaceInFileRel(relFilename, addWeight((i+1)*10)); err != nil {
+					return err
+				}
+
+			case map[interface{}]interface{}:
+				mm := cast.ToStringMap(v)
+
+				if err := m.handleTocEntryRecursive(mm); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *mover) contentMigrate_Replacements() error {
+	log.Println("Start Replacement Step …")
 
 	if m.try {
 		// The try flag is mainly to get the first step correct before we
@@ -217,7 +355,8 @@ func (m *mover) contentMigrate_Step2_Replacements() error {
 
 // TODO(bep) {% include templates/user-journey-content.md %} etc.
 
-func (m *mover) contentMigrate_Step3_Final() error {
+func (m *mover) contentMigrate_Final_Step() error {
+	log.Println("Start Final Step …")
 	// Copy additional content files from the work dir.
 	// This will in some cases revert changes made in previous steps, but
 	// these are intentional.
@@ -311,6 +450,16 @@ func (m *mover) absFilename(name string) string {
 		panic("path too short")
 	}
 	return abs
+}
+
+func (m *mover) checkRelFileExists(rel string) bool {
+	if _, err := os.Stat(m.absFilename(rel)); err != nil {
+		if !os.IsNotExist(err) {
+			panic(err)
+		}
+		return false
+	}
+	return true
 }
 
 func must(err error) {
@@ -425,6 +574,12 @@ func addToDocsMainMenu(weight int) func(path, s string) (string, error) {
 func addLinkTitle(title string) func(path, s string) (string, error) {
 	return func(path, s string) (string, error) {
 		return appendToFrontMatter(s, fmt.Sprintf("linkTitle: %q", title)), nil
+	}
+}
+
+func addWeight(weight int) func(path, s string) (string, error) {
+	return func(path, s string) (string, error) {
+		return appendToFrontMatter(s, fmt.Sprintf("weight: %d", weight)), nil
 	}
 }
 

@@ -1,0 +1,19 @@
+{{/* TODO(bep) partialCached key */}}
+{{ $section := . }}
+<div class="item" data-title="{{ .LinkTitle }}">
+<div class="container">
+{{ template "section-tree-nav" $section }}
+</div>
+</div>
+{{ define "section-tree-nav" }}
+	{{ range .Sections.Reverse}}
+	<div class="item" data-title="{{ .LinkTitle }}">
+		<div class="container">
+		{{ range .Pages }}
+		<a class="item" data-title="{{ .LinkTitle }}" href="{{ .RelPermalink }}"></a>
+		{{ end }}
+		{{ template "section-tree-nav" . }}
+		</div>
+	</div>
+	{{ end }}
+{{ end }}
